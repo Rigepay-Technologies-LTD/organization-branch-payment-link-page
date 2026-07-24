@@ -6,7 +6,6 @@ export const http = axios.create({
 })
 
 export interface ManualPaymentInstructions {
-  collection_code: string
   paybill?: string
   stanbic_account?: string
   kcb_account?: string
@@ -66,6 +65,16 @@ export async function payWithCard(code: string, email: string, amountCents?: num
     amount_cents: amountCents,
   })
   return res.data
+}
+
+// Mirrors internal/services/fee_service.go's CalculateGrossAmount("paystack")
+// exactly (1000 cents fixed fee, 4.0% provider rate) so the payer sees the
+// real fee-inclusive total before paying, not an approximation.
+export function estimateCardGrossAmount(netAmountCents: number): number {
+  const fixedFee = 1000
+  const providerRate = 0.04
+  const targetNet = netAmountCents + fixedFee
+  return Math.round(targetNet / (1 - providerRate))
 }
 
 export function extractErrorMessage(err: unknown): string {
