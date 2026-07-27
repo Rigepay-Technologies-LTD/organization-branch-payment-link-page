@@ -22,6 +22,11 @@ export interface PublicPaymentLink {
   is_reusable: boolean
   allow_open_amount: boolean
   manual_payment?: ManualPaymentInstructions
+  // Only present when this link backs a developer-API checkout session
+  // (POST /api/v1/payments/checkout/sessions) with a restricted set of
+  // payment methods. Absent/empty means "no restriction" — every ordinary
+  // dashboard-created payment link keeps showing all methods as before.
+  allowed_rails?: string[]
 }
 
 export async function fetchPaymentLink(code: string): Promise<PublicPaymentLink> {

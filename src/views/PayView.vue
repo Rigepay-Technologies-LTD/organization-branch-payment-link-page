@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   fetchPaymentLink, payWithStk, payWithCard, estimateCardGrossAmount, extractErrorMessage,
   type PublicPaymentLink,
@@ -8,10 +8,8 @@ import {
 import { formatMoney } from '@/lib/format'
 
 const route = useRoute()
+const router = useRouter()
 const code = route.params.code as string
-
-
-const cardReturnStatus = (route.query.payment as string) || null
 
 const loading = ref(true)
 const loadError = ref<string | null>(null)
@@ -33,20 +31,35 @@ async function load() {
 }
 onMounted(async () => {
   await load()
-  if (cardReturnStatus === 'success') {
-    selectedMethod.value = 'CARD'
-    if (link.value?.status === 'PAID') {
-      stkPaid.value = true
-    } else {
-      startPoll()
-    }
-  } else if (cardReturnStatus === 'error') {
-    selectedMethod.value = 'CARD'
-    cardError.value = 'Your card payment was not completed. You can try again or use another method.'
+  if (!availableMethods.value.includes(selectedMethod.value)) {
+    selectedMethod.value = availableMethods.value[0] ?? 'MPESA'
+  }
+  // Card payment no longer returns here at all — Paystack/Cashia redirect
+  // straight to the dedicated /success or /error route now (see
+  // InitiateOrgPaymentLinkGlobalPayment on the backend). If the link is
+  // already paid on load (e.g. a reusable link, or the customer reloaded
+  // this page after paying), send them to the success screen directly.
+  if (link.value?.status === 'PAID') {
+    router.push({ name: 'pay-success', query: { code } })
   }
 })
 
 type Method = 'MPESA' | 'CARD' | 'MANUAL'
+
+// allowed_rails restricts which methods a checkout-session-backed link
+// shows. An ordinary payment link has no allowed_rails at all, so every
+// method stays available — this only narrows the tab list when the
+// creating org explicitly restricted rails via the checkout API.
+const availableMethods = computed<Method[]>(() => {
+  const rails = link.value?.allowed_rails
+  if (!rails || rails.length === 0) return ['MPESA', 'CARD', 'MANUAL']
+  const methods: Method[] = []
+  if (rails.includes('mpesa_stk')) methods.push('MPESA')
+  if (rails.includes('card')) methods.push('CARD')
+  if (rails.includes('mpesa_c2b') || rails.includes('bank_transfer')) methods.push('MANUAL')
+  return methods
+})
+
 const selectedMethod = ref<Method>('MPESA')
 
 const openAmountKes = ref('')
@@ -71,7 +84,6 @@ function copy(text: string) {
 const stkSubmitting = ref(false)
 const stkError = ref<string | null>(null)
 const stkPolling = ref(false)
-const stkPaid = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function startPoll() {
@@ -81,9 +93,9 @@ function startPoll() {
     try {
       const fresh = await fetchPaymentLink(code)
       if (fresh.status === 'PAID') {
-        stkPaid.value = true
         stkPolling.value = false
         if (pollTimer) clearInterval(pollTimer)
+        router.push({ name: 'pay-success', query: { code } })
       }
     } catch {
       console.log("Failed to Poll")
@@ -141,10 +153,13 @@ type ManualSubMethod = 'MPESA' | 'STANBIC' | 'KCB'
 const manualSubMethod = ref<ManualSubMethod>('MPESA')
 
 const manualOptions = computed(() => {
+  const rails = link.value?.allowed_rails
+  const c2bAllowed = !rails || rails.length === 0 || rails.includes('mpesa_c2b')
+  const bankAllowed = !rails || rails.length === 0 || rails.includes('bank_transfer')
   const opts: { key: ManualSubMethod; label: string; icon: string }[] = []
-  if (link.value?.manual_payment?.paybill) opts.push({ key: 'MPESA', label: 'M-Pesa Paybill', icon: '📲' })
-  if (link.value?.manual_payment?.stanbic_account) opts.push({ key: 'STANBIC', label: 'Stanbic Bank', icon: '🏦' })
-  if (link.value?.manual_payment?.kcb_account) opts.push({ key: 'KCB', label: 'KCB Bank', icon: '🏦' })
+  if (c2bAllowed && link.value?.manual_payment?.paybill) opts.push({ key: 'MPESA', label: 'M-Pesa Paybill', icon: '📲' })
+  if (bankAllowed && link.value?.manual_payment?.stanbic_account) opts.push({ key: 'STANBIC', label: 'Stanbic Bank', icon: '🏦' })
+  if (bankAllowed && link.value?.manual_payment?.kcb_account) opts.push({ key: 'KCB', label: 'KCB Bank', icon: '🏦' })
   return opts
 })
 
@@ -190,7 +205,7 @@ function startManualPoll() {
             <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4 ml-2">Select Payment Method</p>
             <nav class="space-y-2">
               <button
-                v-for="method in (['MPESA', 'CARD', 'MANUAL'] as Method[])"
+                v-for="method in availableMethods"
                 :key="method"
                 type="button"
                 @click="selectedMethod = method"
@@ -233,23 +248,7 @@ function startManualPoll() {
             </div>
           </div>
 
-          <div v-if="stkPaid" class="text-center fade-in py-10">
-            <div class="w-20 h-20 bg-emerald-500 text-white rounded-full flex items-center justify-center text-4xl mx-auto mb-6 shadow-xl shadow-emerald-500/30">✓</div>
-            <h3 class="text-2xl font-black text-slate-900 mb-2">Payment Successful!</h3>
-            <p class="text-slate-500 text-sm mb-6">We have confirmed your payment.</p>
-            <div class="bg-slate-50 border border-slate-200 rounded-xl p-6 text-left space-y-3 max-w-sm mx-auto">
-              <div class="flex justify-between text-sm">
-                <span class="text-slate-500 font-medium">Amount Paid</span>
-                <span class="font-bold text-slate-900">KES {{ formatMoney(displayTotalCents) }}</span>
-              </div>
-              <div class="flex justify-between text-sm border-t border-slate-200 pt-3">
-                <span class="text-slate-500 font-medium">Reference</span>
-                <span class="font-mono font-bold text-slate-900">{{ link.code }}</span>
-              </div>
-            </div>
-          </div>
-
-          <div v-else>
+          <div>
             <div v-if="link.allow_open_amount" class="mb-6">
               <label class="block text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">
                 Amount (KES) — min {{ formatMoney(link.amount_cents) }}
