@@ -72,6 +72,13 @@ export async function payWithCard(code: string, email: string, amountCents?: num
   return res.data
 }
 
+// Called from SuccessView.vue when the browser lands back from Paystack. A redirect
+// alone proves nothing — this independently confirms the charge with Paystack's
+// server and queues it for crediting rather than trusting the redirect itself.
+export async function verifyCardPayment(code: string, reference: string): Promise<void> {
+  await http.get(`/public/org-payment-links/${code}/verify`, { params: { reference } })
+}
+
 // Mirrors internal/services/fee_service.go's CalculateGrossAmount("paystack")
 // exactly (1000 cents fixed fee, 4.0% provider rate) so the payer sees the
 // real fee-inclusive total before paying, not an approximation.
