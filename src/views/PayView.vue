@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   fetchPaymentLink, payWithStk, payWithCard, estimateCardGrossAmount, extractErrorMessage,
-  type PublicPaymentLink,
+  type PublicPaymentLink, type CustomerDetails,
 } from '@/lib/api'
 import { formatMoney } from '@/lib/format'
 
@@ -34,6 +34,9 @@ onMounted(async () => {
   if (!availableMethods.value.includes(selectedMethod.value)) {
     selectedMethod.value = availableMethods.value[0] ?? 'MPESA'
   }
+  if (link.value?.allow_open_amount && (link.value.amount_cents ?? 0) > 0 && !openAmountKes.value) {
+    openAmountKes.value = String((link.value.amount_cents ?? 0) / 100)
+  }
   // Card payment no longer returns here at all — Paystack/Cashia redirect
   // straight to the dedicated /success or /error route now (see
   // InitiateOrgPaymentLinkGlobalPayment on the backend). If the link is
@@ -50,15 +53,37 @@ type Method = 'MPESA' | 'CARD' | 'MANUAL'
 // shows. An ordinary payment link has no allowed_rails at all, so every
 // method stays available — this only narrows the tab list when the
 // creating org explicitly restricted rails via the checkout API.
+// Organization-configured method allow-list (mobile_money,card,bank).
+const configuredMethods = computed<string[] | null>(() => {
+  const raw = link.value?.payment_methods?.trim()
+  if (!raw) return null
+  return raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+})
+
 const availableMethods = computed<Method[]>(() => {
   const rails = link.value?.allowed_rails
-  if (!rails || rails.length === 0) return ['MPESA', 'CARD', 'MANUAL']
-  const methods: Method[] = []
-  if (rails.includes('mpesa_stk')) methods.push('MPESA')
-  if (rails.includes('card')) methods.push('CARD')
-  if (rails.includes('mpesa_c2b') || rails.includes('bank_transfer')) methods.push('MANUAL')
-  return methods
+  let methods: Method[]
+  if (!rails || rails.length === 0) {
+    methods = ['MPESA', 'CARD', 'MANUAL']
+  } else {
+    methods = []
+    if (rails.includes('mpesa_stk')) methods.push('MPESA')
+    if (rails.includes('card')) methods.push('CARD')
+    if (rails.includes('mpesa_c2b') || rails.includes('bank_transfer')) methods.push('MANUAL')
+  }
+  const cfg = configuredMethods.value
+  if (cfg) {
+    methods = methods.filter((m) =>
+      (m === 'MPESA' && cfg.includes('mobile_money')) ||
+      (m === 'CARD' && cfg.includes('card')) ||
+      (m === 'MANUAL' && cfg.includes('bank')),
+    )
+  }
+  return methods.length ? methods : ['MPESA']
 })
+
+const brandColor = computed(() => link.value?.brand_color || '')
+const brandStyle = computed(() => (brandColor.value ? { backgroundColor: brandColor.value } : {}))
 
 const selectedMethod = ref<Method>('MPESA')
 
@@ -75,7 +100,26 @@ const cardTotalCents = computed(() => estimateCardGrossAmount(baseAmountCents.va
 const displayTotalCents = computed(() => selectedMethod.value === 'CARD' ? cardTotalCents.value : baseAmountCents.value)
 const cardFeeCents = computed(() => cardTotalCents.value - baseAmountCents.value)
 
-const form = reactive({ phone: '', email: '' })
+const form = reactive({ phone: '', email: '', name: '', reference: '', message: '' })
+
+function collectFieldsValid(): string | null {
+  if (link.value?.collect_name && !form.name.trim()) return 'Enter your name.'
+  if (link.value?.require_reference && !form.reference.trim()) return 'Enter the required reference.'
+  return null
+}
+
+function goCancel() {
+  if (link.value?.cancel_url) window.location.href = link.value.cancel_url
+}
+
+function customerPayload(): CustomerDetails {
+  return {
+    name: form.name.trim() || undefined,
+    email: form.email.trim() || undefined,
+    reference: form.reference.trim() || undefined,
+    message: form.message.trim() || undefined,
+  }
+}
 
 function copy(text: string) {
   navigator.clipboard?.writeText(text)
@@ -115,9 +159,11 @@ async function handleMpesaPay() {
     stkError.value = `Enter an amount (min KES ${formatMoney(link.value.amount_cents)}).`
     return
   }
+  const cf = collectFieldsValid()
+  if (cf) { stkError.value = cf; return }
   stkSubmitting.value = true
   try {
-    await payWithStk(code, cleanPhone, openAmountCents.value)
+    await payWithStk(code, cleanPhone, openAmountCents.value, customerPayload())
     startPoll()
   } catch (err) {
     stkError.value = extractErrorMessage(err)
@@ -139,9 +185,11 @@ async function handleGlobalPay() {
     cardError.value = `Enter an amount (min KES ${formatMoney(link.value.amount_cents)}).`
     return
   }
+  const cf = collectFieldsValid()
+  if (cf) { cardError.value = cf; return }
   cardSubmitting.value = true
   try {
-    const result = await payWithCard(code, form.email, openAmountCents.value)
+    const result = await payWithCard(code, form.email, openAmountCents.value, customerPayload())
     window.location.href = result.data.redirectUrl
   } catch (err) {
     cardError.value = extractErrorMessage(err)
@@ -189,10 +237,19 @@ function startManualPoll() {
 
         <!-- Sidebar -->
         <div class="w-full md:w-80 bg-slate-50 border-r border-slate-200 flex flex-col">
-          <header class="bg-[#111827] text-white p-6 relative overflow-hidden shrink-0">
-            <div class="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-blue-500 to-emerald-500"></div>
-            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-white/10 px-2 py-1 rounded">Paying To</span>
-            <h1 class="text-lg font-bold mt-3 leading-tight truncate">{{ link.merchant_name }}</h1>
+          <header
+            class="bg-[#111827] bg-cover bg-center text-white p-6 relative overflow-hidden shrink-0"
+            :style="link.header_banner_url ? { backgroundImage: `linear-gradient(rgba(17,24,39,0.78), rgba(17,24,39,0.92)), url(${link.header_banner_url})` } : {}"
+          >
+            <div class="absolute top-0 left-0 w-full h-1" :style="brandColor ? brandStyle : {}" :class="brandColor ? '' : 'bg-linear-to-r from-blue-500 to-emerald-500'"></div>
+            <div class="flex items-start gap-3">
+              <img v-if="link.payment_image_url" :src="link.payment_image_url" :alt="link.image_alt || ''" class="w-14 h-14 rounded-xl object-cover border border-white/20 shrink-0" />
+              <div class="min-w-0">
+                <span class="text-[10px] font-bold text-slate-300 uppercase tracking-widest bg-white/10 px-2 py-1 rounded">{{ link.link_type === 'DONATION' ? 'Donating To' : link.link_type === 'INVOICE' ? 'Invoice From' : 'Paying To' }}</span>
+                <h1 class="text-lg font-bold mt-2 leading-tight truncate">{{ link.merchant_name }}</h1>
+                <p v-if="link.name" class="text-xs text-slate-300 truncate">{{ link.name }}</p>
+              </div>
+            </div>
 
             <div class="mt-4 flex items-baseline gap-1">
               <span class="text-xs font-bold text-slate-400">{{ link.currency }}</span>
@@ -249,14 +306,37 @@ function startManualPoll() {
           </div>
 
           <div>
+            <div v-if="link.restricted_to_customer" class="mb-6 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-800">
+              This payment link is reserved for a specific customer. Pay with the phone number it was issued to.
+            </div>
+
             <div v-if="link.allow_open_amount" class="mb-6">
               <label class="block text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">
-                Amount (KES) — min {{ formatMoney(link.amount_cents) }}
+                <template v-if="(link.amount_cents ?? 0) > 0">Amount (KES) — suggested {{ formatMoney(link.amount_cents) }}, you can change it</template>
+                <template v-else>Amount (KES) — min {{ formatMoney(link.amount_cents) }}</template>
               </label>
               <input
                 v-model="openAmountKes" type="number" :placeholder="formatMoney(link.amount_cents)"
                 class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 font-bold outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all"
               />
+            </div>
+
+            <div v-if="link.collect_name || link.require_reference || link.allow_message" class="mb-6 space-y-4">
+              <div v-if="link.collect_name">
+                <label class="block text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Your name</label>
+                <input v-model="form.name" type="text" placeholder="Full name"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 font-semibold outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all" />
+              </div>
+              <div v-if="link.require_reference">
+                <label class="block text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Reference</label>
+                <input v-model="form.reference" type="text" placeholder="e.g. account or order number"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 font-semibold outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all" />
+              </div>
+              <div v-if="link.allow_message">
+                <label class="block text-xs font-bold text-slate-500 mb-2 uppercase tracking-wide">Message <span class="text-slate-400 normal-case font-semibold">(optional)</span></label>
+                <textarea v-model="form.message" rows="2" placeholder="Add a note for the recipient"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 font-semibold outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all"></textarea>
+              </div>
             </div>
 
             <div v-if="selectedMethod === 'CARD' && cardFeeCents > 0" class="mb-6">
@@ -419,6 +499,12 @@ function startManualPoll() {
                   {{ stkPolling ? 'Verifying Payment...' : manualConfirmed ? "We'll confirm once received" : 'I have Completed Payment' }}
                 </button>
               </template>
+            </div>
+
+            <div v-if="link.cancel_url" class="mt-6 text-center">
+              <button type="button" class="text-xs font-semibold text-slate-400 hover:text-slate-600 underline" @click="goCancel">
+                Cancel and return
+              </button>
             </div>
           </div>
         </div>

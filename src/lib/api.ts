@@ -13,6 +13,7 @@ export interface ManualPaymentInstructions {
 
 export interface PublicPaymentLink {
   code: string
+  name?: string
   amount_cents: number
   currency: string
   merchant_name: string
@@ -27,6 +28,23 @@ export interface PublicPaymentLink {
   // payment methods. Absent/empty means "no restriction" — every ordinary
   // dashboard-created payment link keeps showing all methods as before.
   allowed_rails?: string[]
+  // Organization-configured checkout customisation.
+  payment_image_url?: string
+  header_banner_url?: string
+  brand_color?: string
+  image_alt?: string
+  redirect_url?: string
+  cancel_url?: string
+  // Comma-separated: mobile_money,card,bank. Empty = all.
+  payment_methods?: string
+  collect_name?: boolean
+  collect_phone?: boolean
+  collect_email?: boolean
+  require_reference?: boolean
+  allow_message?: boolean
+  link_type?: 'STANDARD' | 'INVOICE' | 'CUSTOMER' | 'DONATION'
+  amount_mode?: 'FIXED' | 'OPEN' | 'OPTIONAL_PRESET'
+  restricted_to_customer?: boolean
 }
 
 export async function fetchPaymentLink(code: string): Promise<PublicPaymentLink> {
@@ -45,10 +63,23 @@ export interface StkPushResult {
   }
 }
 
-export async function payWithStk(code: string, phoneNumber: string, amountCents?: number): Promise<StkPushResult> {
+export interface CustomerDetails {
+  name?: string
+  email?: string
+  reference?: string
+  message?: string
+}
+
+export async function payWithStk(
+  code: string, phoneNumber: string, amountCents?: number, customer?: CustomerDetails,
+): Promise<StkPushResult> {
   const res = await http.post<StkPushResult>(`/public/org-payment-links/${code}/stkpush`, {
     phone_number: phoneNumber,
     amount_cents: amountCents,
+    customer_name: customer?.name,
+    customer_email: customer?.email,
+    customer_reference: customer?.reference,
+    customer_message: customer?.message,
   })
   return res.data
 }
@@ -64,10 +95,15 @@ export interface CardCheckoutResult {
   }
 }
 
-export async function payWithCard(code: string, email: string, amountCents?: number): Promise<CardCheckoutResult> {
+export async function payWithCard(
+  code: string, email: string, amountCents?: number, customer?: CustomerDetails,
+): Promise<CardCheckoutResult> {
   const res = await http.post<CardCheckoutResult>(`/public/org-payment-links/${code}/pay-global`, {
     email,
     amount_cents: amountCents,
+    customer_name: customer?.name,
+    customer_reference: customer?.reference,
+    customer_message: customer?.message,
   })
   return res.data
 }

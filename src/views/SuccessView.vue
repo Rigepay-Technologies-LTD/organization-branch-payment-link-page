@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { fetchPaymentLink, verifyCardPayment, extractErrorMessage, type PublicPaymentLink } from '@/lib/api'
 import { formatMoney } from '@/lib/format'
@@ -16,6 +16,21 @@ type Status = 'loading' | 'confirming' | 'success' | 'failed'
 const status = ref<Status>('loading')
 const failMessage = ref<string | null>(null)
 const link = ref<PublicPaymentLink | null>(null)
+const redirectCountdown = ref(0)
+let redirectTimer: ReturnType<typeof setInterval> | null = null
+
+function maybeRedirect() {
+  const url = link.value?.redirect_url
+  if (!url) return
+  redirectCountdown.value = 5
+  redirectTimer = setInterval(() => {
+    redirectCountdown.value -= 1
+    if (redirectCountdown.value <= 0) {
+      if (redirectTimer) clearInterval(redirectTimer)
+      window.location.href = url
+    }
+  }, 1000)
+}
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let pollAttempts = 0
@@ -102,7 +117,14 @@ onMounted(async () => {
   await loadLink()
 })
 
-onUnmounted(stopPoll)
+watch(status, (s) => {
+  if (s === 'success') maybeRedirect()
+})
+
+onUnmounted(() => {
+  stopPoll()
+  if (redirectTimer) clearInterval(redirectTimer)
+})
 </script>
 
 <template>
@@ -139,6 +161,9 @@ onUnmounted(stopPoll)
         <div class="w-20 h-20 bg-emerald-500 text-white rounded-full flex items-center justify-center text-4xl mx-auto mb-6 shadow-xl shadow-emerald-500/30">✓</div>
         <h1 class="text-2xl font-black text-slate-900 mb-2">Payment Successful!</h1>
         <p class="text-slate-500 text-sm mb-6">We've confirmed your payment.</p>
+        <p v-if="redirectCountdown > 0" class="text-xs text-slate-400 mb-4">
+          Returning to the merchant in {{ redirectCountdown }}s…
+        </p>
 
         <div v-if="link" class="bg-slate-50 border border-slate-200 rounded-xl p-6 text-left space-y-3">
           <div class="flex justify-between text-sm">
